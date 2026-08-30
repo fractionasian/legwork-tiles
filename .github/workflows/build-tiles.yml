@@ -1,0 +1,64 @@
+name: Build City Tiles
+
+# Builds pre-baked OSM path tiles and publishes them to THIS repo (legwork-tiles).
+# The build script + city config live in the public `legwork` repo; this workflow
+# checks that out read-only, runs the build, and force-pushes a single squashed
+# commit here (no history growth — keeps the repo light).
+
+on:
+  schedule:
+    # Weekly: Sunday 02:00 UTC (10:00 AWST)
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-tiles
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout legwork-tiles (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout legwork (build script + city config, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: fractionasian/legwork
+          path: .legwork-src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build tiles
+        # build-tiles.js writes to <script>/../data (i.e. .legwork-src/data/)
+        run: node .legwork-src/scripts/build-tiles.js
+
+      - name: Sync built output into this repo
+        run: |
+          rm -rf tiles manifest.json
+          cp .legwork-src/data/manifest.json ./manifest.json
+          cp -r .legwork-src/data/tiles ./tiles
+          rm -rf .legwork-src
+
+      - name: Publish (single squashed commit, force-push)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No tile changes — nothing to publish."
+            exit 0
+          fi
+          VERSION=$(node -e "process.stdout.write(require('./manifest.json').version)")
+          # --amend keeps the repo at exactly one commit (no history bloat).
+          # The workflow + README are already in the checked-out tree, so amend preserves them.
+          git commit --amend -m "Tiles: build ${VERSION}"
+          git push --force origin HEAD:master
