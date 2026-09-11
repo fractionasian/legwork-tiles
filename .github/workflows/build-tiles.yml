@@ -21,7 +21,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Recent full builds run ~18 min for 11 cities. Seoul is the densest box in
+    # the set, and the script's Overpass retries back off 10/20/40 s, so the
+    # 30 min ceiling had no room left. A timeout kills the whole run, so every
+    # city's refresh is lost — not just the one that was slow.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout legwork-tiles (this repo)
