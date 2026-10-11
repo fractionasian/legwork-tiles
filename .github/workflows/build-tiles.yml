@@ -1,0 +1,96 @@
+name: Build City Tiles
+
+# Builds pre-baked OSM path tiles and publishes them to THIS repo (legwork-tiles).
+# The build script + city config live in the public `legwork` repo; this workflow
+# checks that out read-only, runs the build, and force-pushes a single squashed
+# commit here (no history growth — keeps the repo light).
+
+on:
+  schedule:
+    # Weekly: Sunday 02:00 UTC (10:00 AWST)
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-tiles
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A full build with heights for all 12 cities took 35 min (2026-10-06; 23 min
+    # before heights were added). Each new city adds roughly 2-3 min, and Overpass
+    # retries back off 10/20/40 s. A timeout kills the whole run, so every city's
+    # refresh is lost, not just the slow one: keep a wide margin over the last run.
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout legwork-tiles (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout legwork (build script + city config, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: fractionasian/legwork
+          path: .legwork-src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Seed build with the currently published tiles
+        # If a city's Overpass query fails, build-tiles.js keeps that city's
+        # previous manifest entry and leaves its tile directory alone. That only
+        # works if the previous manifest and tiles are where the script looks.
+        run: |
+          mkdir -p .legwork-src/data
+          cp manifest.json .legwork-src/data/manifest.json
+          cp -r tiles .legwork-src/data/tiles
+
+      - name: Build tiles
+        id: build
+        # build-tiles.js writes to <script>/../data (i.e. .legwork-src/data/).
+        # Exit 0 = all cities built; 3 = some failed but kept their previous
+        # tiles (publish, then go red below); anything else = nothing to publish.
+        run: |
+          set +e
+          node .legwork-src/scripts/build-tiles.js
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -eq 0 ] || [ "$code" -eq 3 ]
+
+      - name: Sync built output into this repo
+        # Copy only cities in the new manifest: the seeded tiles/ still holds
+        # directories for any city since removed from cities.json.
+        run: |
+          rm -rf tiles manifest.json
+          cp .legwork-src/data/manifest.json ./manifest.json
+          mkdir tiles
+          for id in $(node -e "console.log(Object.keys(require('./manifest.json').cities).join(' '))"); do
+            cp -r ".legwork-src/data/tiles/$id" "tiles/$id"
+          done
+          rm -rf .legwork-src
+
+      - name: Publish (single squashed commit, force-push)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No tile changes — nothing to publish."
+            exit 0
+          fi
+          VERSION=$(node -e "process.stdout.write(require('./manifest.json').version)")
+          # --amend keeps the repo at exactly one commit (no history bloat).
+          # The workflow + README are already in the checked-out tree, so amend preserves them.
+          git commit --amend -m "Tiles: build ${VERSION}"
+          git push --force origin HEAD:master
+
+      - name: Fail if any city was skipped
+        if: steps.build.outputs.code == '3'
+        run: |
+          echo "::error::Partial tile build — one or more cities kept last week's tiles. See the 'Build tiles' log for which."
+          exit 1
