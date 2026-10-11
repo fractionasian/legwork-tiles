@@ -41,15 +41,37 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Seed build with the currently published tiles
+        # If a city's Overpass query fails, build-tiles.js keeps that city's
+        # previous manifest entry and leaves its tile directory alone. That only
+        # works if the previous manifest and tiles are where the script looks.
+        run: |
+          mkdir -p .legwork-src/data
+          cp manifest.json .legwork-src/data/manifest.json
+          cp -r tiles .legwork-src/data/tiles
+
       - name: Build tiles
-        # build-tiles.js writes to <script>/../data (i.e. .legwork-src/data/)
-        run: node .legwork-src/scripts/build-tiles.js
+        id: build
+        # build-tiles.js writes to <script>/../data (i.e. .legwork-src/data/).
+        # Exit 0 = all cities built; 3 = some failed but kept their previous
+        # tiles (publish, then go red below); anything else = nothing to publish.
+        run: |
+          set +e
+          node .legwork-src/scripts/build-tiles.js
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -eq 0 ] || [ "$code" -eq 3 ]
 
       - name: Sync built output into this repo
+        # Copy only cities in the new manifest: the seeded tiles/ still holds
+        # directories for any city since removed from cities.json.
         run: |
           rm -rf tiles manifest.json
           cp .legwork-src/data/manifest.json ./manifest.json
-          cp -r .legwork-src/data/tiles ./tiles
+          mkdir tiles
+          for id in $(node -e "console.log(Object.keys(require('./manifest.json').cities).join(' '))"); do
+            cp -r ".legwork-src/data/tiles/$id" "tiles/$id"
+          done
           rm -rf .legwork-src
 
       - name: Publish (single squashed commit, force-push)
@@ -66,3 +88,9 @@ jobs:
           # The workflow + README are already in the checked-out tree, so amend preserves them.
           git commit --amend -m "Tiles: build ${VERSION}"
           git push --force origin HEAD:master
+
+      - name: Fail if any city was skipped
+        if: steps.build.outputs.code == '3'
+        run: |
+          echo "::error::Partial tile build — one or more cities kept last week's tiles. See the 'Build tiles' log for which."
+          exit 1
